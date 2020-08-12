@@ -1,6 +1,6 @@
 package rudp
 
-import (
+import(
 	"bytes"
 	"errors"
 	"sync/atomic"
@@ -57,41 +57,47 @@ type Package struct {
 	Bts  []byte
 }
 
-type packageBuffer struct {
+type PackageBuffer struct {
 	tmp  bytes.Buffer
 	num  int
 	head *Package
 	tail *Package
 }
 
-func (tmp *packageBuffer) packRequest(min, max int, tag int) {
-	if tmp.tmp.Len()+5 > GENERAL_PACKAGE {
+//打包
+func (tmp *PackageBuffer) packRequest(min, max, tag int) {
+	if tmp.tmp.Len() > MAX_DATA_SIZE {
 		tmp.newPackage()
 	}
-	tmp.tmp.WriteByte(byte(tag))
-	tmp.tmp.WriteByte(byte((min & 0xff00) >> 8))
-	tmp.tmp.WriteByte(byte(min & 0xff))
-	tmp.tmp.WriteByte(byte((max & 0xff00) >> 8))
-	tmp.tmp.WriteByte(byte(max & 0xff))
+	tmp.tmp.WriteByte(byte(tag))//包类型
+	tmp.tmp.WriteByte(byte((min & 0xff00) >> 8))//min高8位
+	tmp.tmp.WriteByte(byte(min & 0xff))//min低8位
+	tmp.tmp.WriteByte(byte((max & 0xff00) >> 8))//max高8位
+	tmp.tmp.WriteByte(byte(max & 0xff))//max低8位
 }
-func (tmp *packageBuffer) fillHeader(head, id int) {
+
+//填充头部
+func (tmp *PackageBuffer) fillHeader(head, id int) {
 	if head < 128 {
-		tmp.tmp.WriteByte(byte(head))
+		tmp.tmp.WriteByte(byte(head))//bts length
 	} else {
-		tmp.tmp.WriteByte(byte(((head & 0x7f00) >> 8) | 0x80))
-		tmp.tmp.WriteByte(byte(head & 0xff))
+		//bts length >= 128
+		tmp.tmp.WriteByte(byte(((head & 0x7f00) >> 8) | 0x80))//bts length 取高7位(去除最高位)
+		tmp.tmp.WriteByte(byte(head & 0xff))//bts length 取低8位,防止>255
 	}
-	tmp.tmp.WriteByte(byte((id & 0xff00) >> 8))
-	tmp.tmp.WriteByte(byte(id & 0xff))
+	tmp.tmp.WriteByte(byte((id & 0xff00) >> 8))//msg id 高8位
+	tmp.tmp.WriteByte(byte(id & 0xff))//msg id 低8位
 }
-func (tmp *packageBuffer) packMessage(m *message) {
-	if m.buf.Len()+4+tmp.tmp.Len() >= GENERAL_PACKAGE {
+
+func (tmp *PackageBuffer) packMessage(m *MessageItem) {
+	if m.byteBuffer.Len()+tmp.tmp.Len() >= MAX_DATA_SIZE {
 		tmp.newPackage()
 	}
-	tmp.fillHeader(m.buf.Len()+TYPE_NORMAL, m.id)
-	tmp.tmp.Write(m.buf.Bytes())
+	tmp.fillHeader(m.byteBuffer.Len()+TYPE_NORMAL, m.id)
+	tmp.tmp.Write(m.byteBuffer.Bytes())
 }
-func (tmp *packageBuffer) newPackage() {
+
+func (tmp *PackageBuffer) newPackage() {
 	if tmp.tmp.Len() <= 0 {
 		return
 	}
@@ -108,28 +114,28 @@ func (tmp *packageBuffer) newPackage() {
 	}
 }
 
-func New() *Rudp {
-	return &Rudp{reqSendAgain: make(chan [2]int, 1<<10), addSendAgain: make(chan [2]int, 1<<10), recvSkip: make(map[int]int)}
-}
-
 type Rudp struct {
-	recvQueue    messageQueue
+	recvQueue    MessageQueue
 	recvSkip     map[int]int
 	reqSendAgain chan [2]int
 	recvIDMin    int
 	recvIDMax    int
 
-	sendQueue    messageQueue
-	sendHistory  messageQueue
+	sendQueue    MessageQueue
+	sendHistory  MessageQueue
 	addSendAgain chan [2]int
 	sendID       int
 
-	corrupt Error
+	corrupt      Error
 
 	currentTick       int
 	lastRecvTick      int
 	lastExpiredTick   int
 	lastSendDelayTick int
+}
+
+func NewRudp() *Rudp {
+	return &Rudp{reqSendAgain: make(chan [2]int, 1<<10), addSendAgain: make(chan [2]int, 1<<10), recvSkip: make(map[int]int)}
 }
 
 func (r *Rudp) Recv(bts []byte) (int, error) {
@@ -141,19 +147,19 @@ func (r *Rudp) Recv(bts []byte) (int, error) {
 		return 0, nil
 	}
 	r.recvIDMin++
-	copy(bts, m.buf.Bytes())
-	return m.buf.Len(), nil
+	copy(bts, m.byteBuffer.Bytes())
+	return m.byteBuffer.Len(), nil
 }
 
-func (r *Rudp) Send(bts []byte) (n int, err error) {
+func (r *Rudp) send(bts []byte) (int, error) {
 	if err := r.corrupt.Load(); err != ERROR_NIL {
 		return 0, r.corrupt.Error()
 	}
-	if len(bts) > MAX_PACKAGE {
-		return 0, nil
+	if len(bts) > MAX_DATA_SIZE {
+		return 0, errors.New("byte array size more then MAX_DATA_SIZE")
 	}
-	m := &message{}
-	m.buf.Write(bts)
+	m := &MessageItem{}
+	m.byteBuffer.Write(bts)
 	m.id = r.sendID
 	r.sendID++
 	m.tick = r.currentTick
@@ -161,6 +167,7 @@ func (r *Rudp) Send(bts []byte) (n int, err error) {
 	return len(bts), nil
 }
 
+//update tick
 func (r *Rudp) Update(tick int) *Package {
 	if r.corrupt.Load() != ERROR_NIL {
 		return nil
@@ -180,51 +187,10 @@ func (r *Rudp) Update(tick int) *Package {
 	return nil
 }
 
-type message struct {
-	next *message
-	buf  bytes.Buffer
-	id   int
-	tick int
-}
-
-type messageQueue struct {
-	head *message
-	tail *message
-	num  int
-}
-
-func (r *messageQueue) pop(id int) *message {
-	if r.head == nil {
-		return nil
-	}
-	m := r.head
-	if id >= 0 && m.id != id {
-		return nil
-	}
-	r.head = m.next
-	m.next = nil
-	if r.head == nil {
-		r.tail = nil
-	}
-	r.num--
-	return m
-}
-
-func (r *messageQueue) push(m *message) {
-	if r.tail == nil {
-		r.head = m
-		r.tail = m
-	} else {
-		r.tail.next = m
-		r.tail = m
-	}
-	r.num++
-}
-
 func (r *Rudp) getID(max int, bt1, bt2 byte) int {
 	n1, n2 := int(bt1), int(bt2)
 	id := n1*256 + n2
-	id |= max & ^0xffff
+	id |= max & ^0xffff//id = id | 0x00
 	if id < max-0x8000 {
 		id += 0x10000
 		dbg("id < max-0x8000 ,net %v,id %v,min %v,max %v,cur %v",
@@ -238,7 +204,7 @@ func (r *Rudp) getID(max int, bt1, bt2 byte) int {
 }
 
 func (r *Rudp) outPut() *Package {
-	var tmp packageBuffer
+	var tmp PackageBuffer
 	r.reqMissing(&tmp)
 	r.replyRequest(&tmp)
 	r.sendMessage(&tmp)
@@ -328,8 +294,8 @@ func (r *Rudp) insertMessage(id int, bts []byte) {
 	}
 	delete(r.recvSkip, id)
 	if id > r.recvIDMax || r.recvQueue.head == nil {
-		m := &message{}
-		m.buf.Write(bts)
+		m := &MessageItem{}
+		m.byteBuffer.Write(bts)
 		m.id = id
 		r.recvQueue.push(m)
 		r.recvIDMax = id
@@ -340,8 +306,8 @@ func (r *Rudp) insertMessage(id int, bts []byte) {
 			if m.id == id {
 				dbg("repeat recv id %v,len %v", id, len(bts))
 			} else if m.id > id {
-				tmp := &message{}
-				tmp.buf.Write(bts)
+				tmp := &MessageItem{}
+				tmp.byteBuffer.Write(bts)
 				tmp.id = id
 				tmp.next = m
 				*last = tmp
@@ -354,7 +320,7 @@ func (r *Rudp) insertMessage(id int, bts []byte) {
 	}
 }
 
-func (r *Rudp) sendMessage(tmp *packageBuffer) {
+func (r *Rudp) sendMessage(tmp *PackageBuffer) {
 	m := r.sendQueue.head
 	for m != nil {
 		tmp.packMessage(m)
@@ -408,7 +374,7 @@ func (r *Rudp) addMissing(min, max int) {
 	r.checkMissing(true)
 }
 
-func (r *Rudp) replyRequest(tmp *packageBuffer) {
+func (r *Rudp) replyRequest(tmp *PackageBuffer) {
 	for {
 		select {
 		case again := <-r.addSendAgain:
@@ -445,7 +411,7 @@ func (r *Rudp) replyRequest(tmp *packageBuffer) {
 	}
 }
 
-func (r *Rudp) reqMissing(tmp *packageBuffer) {
+func (r *Rudp) reqMissing(tmp *PackageBuffer) {
 	for {
 		select {
 		case req := <-r.reqSendAgain:

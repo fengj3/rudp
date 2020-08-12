@@ -1,6 +1,16 @@
 package rudp
 
-import "time"
+import (
+	"time"
+)
+
+var pingPacket []byte = []byte{0x00}
+
+var (
+	MAX_PACKET_SIZE int = 1000
+	MAX_HEADER_SIZE int = 2 + 6 + 6
+	MAX_DATA_SIZE int = MAX_PACKET_SIZE - MAX_HEADER_SIZE
+)
 
 //rudp
 var corruptTick int = 5
